@@ -1,18 +1,32 @@
 pub mod afterlife;
+pub mod archaeologist;
+pub mod artifact_vault;
+pub mod cemetery;
 pub mod graveyard;
 pub mod memorial;
+pub mod memory_tombstone;
 pub mod necropolis;
+pub mod process_graveyard;
+pub mod resurrection;
 pub mod tombstone;
 
 pub use afterlife::{Afterlife, KnowledgeFragment};
+pub use archaeologist::{Archaeologist, ArchaeologyReport, DiscoveredPattern, PatternSeverity};
+pub use artifact_vault::{ArtifactVault, ArtifactCategory};
+pub use cemetery::{CodeCemetery, CodeStatus, DeadCodeEntry};
 pub use graveyard::Graveyard;
 pub use memorial::{MemorialLog, MemorialVisit};
+pub use memory_tombstone::{MemoryTombstoneSystem, MemoryDataType, MemoryTombstone};
 pub use necropolis::{Necropolis, NecropolisStats};
+pub use process_graveyard::{ProcessGraveyard, TerminationReason, ProcessStatus, ProcessRecord};
+pub use resurrection::{ResurrectionProtocol, ResurrectionCriteria, ResurrectionStatus, ResurrectionCandidate, ResurrectionRecord};
 pub use tombstone::{Tombstone, VesselState};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── Original tests ───
 
     // 1. tombstone new defaults
     #[test]
@@ -235,5 +249,91 @@ mod tests {
         }
         let result = gy.bury(Tombstone::new(99, "overflow"));
         assert!(result.is_err());
+    }
+
+    // ─── Integration tests ───
+
+    #[test]
+    fn test_full_necropolis_workflow() {
+        let mut arch = Archaeologist::new();
+        let mut cem = CodeCemetery::new();
+        let mut mts = MemoryTombstoneSystem::new();
+        let mut pg = ProcessGraveyard::new();
+        let mut vault = ArtifactVault::new();
+
+        // Register and bury code in same module (triggers clustering pattern)
+        let code_id = cem.register("critical_fn", "engine", 42, 512, 0);
+        for i in 0..10 { cem.touch(code_id, i); }
+        cem.mark_suspect(code_id);
+        cem.bury(code_id, 100, "optimization removed").unwrap();
+        let code_id2 = cem.register("helper_fn", "engine", 99, 128, 0);
+        cem.bury(code_id2, 100, "dead code").unwrap();
+
+        // Mark freed memory from same owner (triggers leak pattern)
+        mts.mark_freed(0x1000, 256, MemoryDataType::Instruction, "process_1", 0, 50, 12345,
+            vec![0xDE, 0xAD, 0xBE, 0xEF], "process killed").unwrap();
+        mts.mark_freed(0x2000, 128, MemoryDataType::HeapObject, "process_1", 0, 60, 54321,
+            vec![], "leaked").unwrap();
+        mts.mark_freed(0x3000, 64, MemoryDataType::Buffer, "process_1", 0, 70, 99999,
+            vec![], "leaked").unwrap();
+
+        // Register and terminate processes including a crash (triggers crash pattern)
+        let proc_id = pg.register("worker_1", 5, 0);
+        pg.add_error(proc_id, "resource exhausted");
+        pg.terminate(proc_id, 80, TerminationReason::TimedOut, 10000, 2048, 50000).unwrap();
+        pg.set_output(proc_id, "partial results: 42 items processed");
+
+        let crash_id = pg.register("crasher", 6, 0);
+        pg.terminate(crash_id, 90, TerminationReason::Crash("segfault".to_string()), 5000, 1024, 30000).unwrap();
+
+        // Preserve artifacts
+        vault.preserve("partial_results", ArtifactCategory::KnowledgeBase, 5, 1024, 99, 80, 0.8, "sha256").unwrap();
+        vault.add_metadata(1, "items_processed", "42");
+
+        // Evaluate resurrection candidates
+        let mut rp = ResurrectionProtocol::new();
+        rp.evaluate_code_cemetery(&cem, 200);
+        rp.evaluate_process_graveyard(&pg, 200);
+        let ranked = rp.ranked_candidates();
+        assert!(!ranked.is_empty());
+
+        // Archaeological analysis
+        let report = arch.analyze(&cem, &mts, &pg, &vault, 200);
+        assert_eq!(report.total_dead_code_entries, 2);
+        assert!(report.total_freed_memory_bytes > 0);
+        assert!(!report.patterns.is_empty());
+    }
+
+    #[test]
+    fn test_resurrection_with_archaeology() {
+        let mut arch = Archaeologist::new();
+        let mut cem = CodeCemetery::new();
+        let mut pg = ProcessGraveyard::new();
+        let vault = ArtifactVault::new();
+
+        // Bury some useful code
+        for i in 0..5 {
+            let id = cem.register(&format!("fn_{}", i), "utils", i as u64, 64, 0);
+            cem.bury(id, 100, "dead code cleanup").unwrap();
+        }
+
+        // Terminate a completed process
+        let proc_id = pg.register("batch_worker", 10, 0);
+        pg.terminate(proc_id, 500, TerminationReason::Completed, 50000, 4096, 100000).unwrap();
+
+        // Analyze
+        arch.analyze(&cem, &MemoryTombstoneSystem::new(), &pg, &vault, 1000);
+
+        // Evaluate for resurrection
+        let mut rp = ResurrectionProtocol::new();
+        rp.evaluate_code_cemetery(&cem, 1000);
+        rp.evaluate_process_graveyard(&pg, 1000);
+
+        // Accept a candidate and complete resurrection
+        if !rp.ranked_candidates().is_empty() {
+            let mut record = rp.accept(0).unwrap();
+            rp.complete_resurrection(&mut record, 25, 2);
+            assert_eq!(rp.succeeded_count, 1);
+        }
     }
 }
